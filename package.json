@@ -1,0 +1,30 @@
+{
+  "name": "jev-folder-organizer",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "npm run build && node --env-file-if-exists=.env src/server.js",
+    "dev": "node --env-file-if-exists=.env src/server.js",
+    "dev:ui": "vite --host 127.0.0.1",
+    "build": "vite build",
+    "test": "npm run build && node --test",
+    "build:native": "node scripts/build-native.js",
+    "test:native": "npm run build:native && node --test test/media-native.test.js",
+    "test:e2e": "npm run build && playwright test",
+    "check": "node --check src/server.js && node --check src/organizer.js && node --check src/classifier.js && node --check src/folder-picker.js && npm run build"
+  },
+  "dependencies": {
+    "@typesafe-ai/sdk": "0.6.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.63.0",
+    "@vitejs/plugin-react": "^6.1.1",
+    "vite": "^8.3.0"
+  }
+}
