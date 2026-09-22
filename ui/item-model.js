@@ -3,6 +3,15 @@ import { buildMediaSegments, validateMediaOverrides } from '../public/media-path
 // 这些纯函数统一维护表格的筛选、校验、选择和目标路径预览规则。
 export const isMedia = item => item.type === 'media';
 
+// 将收件箱的嵌套分类树转换为 select 可用的稳定路径和值。
+export function flattenTaxonomy(nodes, result = []) {
+  for (const node of nodes ?? []) {
+    if (node?.path && node?.name) result.push({ value: node.path, label: node.path.replaceAll('/', ' / ') });
+    flattenTaxonomy(node?.children, result);
+  }
+  return result;
+}
+
 // 根据媒体覆盖字段生成相对目标目录；异常输入会由调用方转成表格错误。
 export function mediaSegments(item) {
   return buildMediaSegments({}, validateMediaOverrides({

@@ -9,12 +9,16 @@ import { classify } from './classifier.js';
 import { categoryNames } from './categories.js';
 import { pickFolder } from './folder-picker.js';
 import { ensureMediaHelper } from './media-native.js';
+import { InboxStore } from './inbox-store.js';
+import { PendingStore } from './pending-store.js';
 
 const projectDir = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const requestKeys = new Map([
   ['/api/pick-folder', ['root']],
-  ['/api/scan', ['root', 'resolveLocations']],
+  ['/api/inboxes', ['id', 'name', 'root', 'taxonomy']],
+  ['/api/scan', ['root', 'resolveLocations', 'inboxId']],
   ['/api/classify', ['scanId', 'itemIds']],
+  ['/api/pending/update', ['id', 'changes']],
   ['/api/move', ['scanId', 'selections']],
   ['/api/undo', ['id']]
 ]);
@@ -40,6 +44,8 @@ export function createApp({ dataDir = path.join(projectDir, '.data'), chooseFold
   scanOptions = {}, platform = process.platform, mediaHelper = ensureMediaHelper, classifyItems = classify } = {}) {
   // 创建本机 API 服务；所有文件扫描和移动都通过 Organizer 完成。
   const organizer = new Organizer(dataDir, scanOptions);
+  const inboxes = new InboxStore(path.join(dataDir, 'inboxes.json'));
+  const pending = new PendingStore(path.join(dataDir, 'pending.json'));
   let mediaSupport;
   const supportsMedia = () => mediaSupport ??= platform !== 'darwin' ? Promise.resolve(false)
     : Promise.resolve().then(() => mediaHelper()).then(() => true, () => false);
@@ -81,6 +87,10 @@ export function createApp({ dataDir = path.join(projectDir, '.data'), chooseFold
       if (!route.startsWith('/api/')) return json(404, { error: '页面不存在。' });
       if (req.headers['x-session-token'] !== token) return json(403, { error: '会话已过期，请刷新页面。' });
       if (req.method === 'GET' && route === '/api/history') return json(200, await organizer.history());
+      if (req.method === 'GET' && route === '/api/inboxes') return json(200, await inboxes.list());
+      if (req.method === 'GET' && route === '/api/pending') {
+        return json(200, await pending.list(new URL(req.url, `http://${req.headers.host}`).searchParams.get('inboxId') || undefined));
+      }
       if (req.method !== 'POST') return json(405, { error: '请求方法不支持。' });
       const body = await readBody(req);
       if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error('请求格式无效。');
@@ -92,11 +102,23 @@ export function createApp({ dataDir = path.join(projectDir, '.data'), chooseFold
         try { return json(200, { root: await chooseFolder(body.root) }); }
         finally { choosingFolder = false; }
       }
+      if (route === '/api/inboxes') {
+        return json(200, await inboxes.save(body));
+      }
+      if (route === '/api/pending/update') {
+        if (typeof body.id !== 'string' || !body.changes || typeof body.changes !== 'object' || Array.isArray(body.changes)
+            || Object.keys(body.changes).some(key => !['category', 'destination', 'recommendationSource', 'status', 'confidence', 'error'].includes(key))) {
+          throw new Error('待处理更新无效。');
+        }
+        return json(200, await pending.update(body.id, body.changes));
+      }
       if (route === '/api/scan') {
         if (Object.hasOwn(body, 'resolveLocations') && typeof body.resolveLocations !== 'boolean') throw new Error('地点解析选项必须为布尔值。');
+        const inbox = body.inboxId === undefined ? null : await inboxes.get(body.inboxId);
         const resolveLocations = body.resolveLocations === true;
-        const scan = await organizer.scan(body.root, { resolveLocations });
+        const scan = await organizer.scan(body.root, { resolveLocations, categories: inbox ? taxonomyChoices(inbox.taxonomy) : undefined });
         const retained = organizer.getScan(scan.id);
+        retained.inboxId = body.inboxId;
         scan.root = retained.root;
         if (resolveLocations) {
           for (const item of scan.items) {
@@ -105,6 +127,15 @@ export function createApp({ dataDir = path.join(projectDir, '.data'), chooseFold
                 && Number.isFinite(facts.latitude) && Number.isFinite(facts.longitude)) {
               item.displayCoordinates = `${facts.latitude.toFixed(4)}, ${facts.longitude.toFixed(4)}`;
             }
+          }
+        }
+        if (body.inboxId) {
+          for (const item of retained.items) {
+            const member = item.type === 'media' ? item.members?.[0] : { name: item.name, identity: item.identity };
+            if (!member) continue;
+            await pending.upsert({ id: item.id, inboxId: body.inboxId, scanId: scan.id, name: item.name,
+              type: item.type, source: path.join(retained.root, member.name), identity: member.identity,
+              category: null, destination: null, recommendationSource: 'unclassified', status: 'pending' });
           }
         }
         return json(200, scan);
@@ -120,12 +151,29 @@ export function createApp({ dataDir = path.join(projectDir, '.data'), chooseFold
         const items = scan.items.filter(item => item.type !== 'media' && selectedIds.has(item.id));
         if (!items.length) return json(200, []);
         classifying = true;
-        try { return json(200, await classifyItems(items)); }
+        try {
+          const inbox = scan.inboxId ? await inboxes.get(scan.inboxId) : null;
+          const results = await classifyItems(items, undefined, inbox ? taxonomyChoiceDescriptions(inbox.taxonomy) : undefined);
+          if (scan.inboxId) {
+            for (const result of results) {
+              const current = (await pending.list(scan.inboxId)).find(item => item.id === result.id);
+              if (current) await pending.upsert({ ...current, ...result, recommendationSource: 'ai', status: 'pending' });
+            }
+          }
+          return json(200, results);
+        }
         finally { classifying = false; }
       }
       if (route === '/api/move') {
         validateSelections(organizer.getScan(body.scanId), body.selections);
-        return json(200, await organizer.move(body.scanId, body.selections));
+        const scan = organizer.getScan(body.scanId);
+        const batch = await organizer.move(body.scanId, body.selections);
+        if (scan.inboxId) {
+          const movedNames = new Set(batch.entries.filter(entry => entry.status === 'moved').map(entry => entry.name));
+          const current = await pending.list(scan.inboxId);
+          await pending.remove(current.filter(item => movedNames.has(item.name)).map(item => item.id));
+        }
+        return json(200, batch);
       }
       if (route === '/api/undo') return json(200, await organizer.undo(body.id));
       return json(404, { error: '接口不存在。' });
@@ -155,6 +203,22 @@ function validateSelections(scan, selections) {
         || Object.values(media).some(value => typeof value !== 'string')) throw new Error('媒体调整字段无效。');
     if (item.mediaType === 'live-photo' && media.mediaType !== undefined && media.mediaType !== 'live-photo') throw new Error('Live Photo 必须一起归入照片。');
   }
+}
+
+function taxonomyChoices(nodes, choices = {}) {
+  for (const node of nodes ?? []) {
+    choices[node.path] = node.name;
+    taxonomyChoices(node.children, choices);
+  }
+  return Object.keys(choices);
+}
+
+function taxonomyChoiceDescriptions(nodes, choices = {}) {
+  for (const node of nodes ?? []) {
+    choices[node.path] = node.name;
+    taxonomyChoiceDescriptions(node.children, choices);
+  }
+  return choices;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {

@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { MediaRow, OrdinaryRow } from './Rows.jsx';
 import {
-  canMove, dateReview, isMedia, locationReview, matchesFilter, needsReview, selectionFor, targetFor, mediaLabel
+  canMove, dateReview, flattenTaxonomy, isMedia, locationReview, matchesFilter, needsReview, selectionFor, targetFor, mediaLabel
 } from './item-model.js';
 
 // 页面筛选项和历史状态的显示文案集中定义，避免 JSX 中散落字符串。
@@ -45,6 +45,9 @@ function History({ batches, busy, onRefresh, onUndo }) {
 export default function App() {
   // 主页面同时承载扫描、分类预览、移动确认和历史记录两个视图。
   const [session, setSession] = useState(null);
+  const [inboxes, setInboxes] = useState([]);
+  const [inboxId, setInboxId] = useState('');
+  const [pending, setPending] = useState([]);
   const [root, setRoot] = useState('');
   const [scan, setScan] = useState(null);
   const [items, setItems] = useState([]);
@@ -80,9 +83,32 @@ export default function App() {
       setSession(value);
       setRoot(value.defaultRoot);
       if (!value.mediaSupported) setMetadataStatus('拍摄信息：自动读取需要 macOS，当前不可用，可手动调整');
-      if (!value.aiEnabled) showNotice('在项目 .env 中设置 TYPESAFE_API_KEY 并重启服务，即可使用 AI 推荐。当前可以扫描、手动分类、移动和撤销。');
+      return api('inboxes', undefined, value.token).then(available => setInboxes(available));
     }).catch(error => showNotice(error.message || '连接失败，请确认本地服务仍在运行。', true));
   }, []);
+
+  useEffect(() => {
+    if (session && !session.aiEnabled) showNotice('在项目 .env 中设置 TYPESAFE_API_KEY 并重启服务，即可使用 AI 推荐。当前可以扫描、手动分类、移动和撤销。');
+  }, [session]);
+
+  const selectedInbox = inboxes.find(inbox => inbox.id === inboxId) ?? null;
+  const taxonomyCategories = selectedInbox ? flattenTaxonomy(selectedInbox.taxonomy).map(category => category.value) : (session?.categories ?? []);
+
+  const loadPending = async selectedId => {
+    if (!selectedId || !session) { setPending([]); return []; }
+    const saved = await api(`pending?inboxId=${encodeURIComponent(selectedId)}`, undefined, session.token);
+    setPending(saved);
+    return saved;
+  };
+
+  const chooseInbox = event => {
+    const nextId = event.target.value;
+    setInboxId(nextId);
+    const next = inboxes.find(inbox => inbox.id === nextId);
+    setRoot(next?.root ?? session?.defaultRoot ?? '');
+    setScan(null); setItems([]);
+    loadPending(nextId);
+  };
 
   const selected = items.filter(item => item.selected && canMove(item));
   const selectable = items.filter(canMove);
@@ -109,14 +135,20 @@ export default function App() {
       setMetadataStatus('拍摄信息：正在读取…');
       setLocationStatus(resolveLocations ? '地点查询：正在处理…' : '地点查询：未开启');
       let result;
-      try { result = await api('scan', { root: root.trim(), resolveLocations }, session.token); }
+      try { result = await api('scan', { root: root.trim(), resolveLocations, ...(inboxId ? { inboxId } : {}) }, session.token); }
       catch (error) {
         setMetadataStatus('拍摄信息：扫描未完成');
         setLocationStatus(resolveLocations ? '地点查询：扫描未完成' : '地点查询：未开启');
         throw error;
       }
       setScan(result); setRoot(result.root || root.trim());
-      setItems(result.items.map(item => ({ ...item, category: null, confidence: null, manual: false, selected: false })));
+      const savedPending = inboxId ? await loadPending(inboxId) : [];
+      const savedByName = new Map(savedPending.map(item => [item.name, item]));
+      setItems(result.items.map(item => {
+        const saved = savedByName.get(item.name);
+        return { ...item, category: saved?.category ?? null, confidence: saved?.confidence ?? null,
+          manual: saved?.recommendationSource === 'manual', selected: false, error: saved?.error ?? null };
+      }));
       const failed = result.items.filter(item => isMedia(item) && item.metadataStatus === 'failed').length;
       setMetadataStatus(session.mediaSupported ? `拍摄信息：读取完成${failed ? ` · ${failed} 项需手动确认` : ''}` : '拍摄信息：自动读取需要 macOS，当前不可用，可手动调整');
       setLocationStatus(resolveLocations ? `地点查询：处理完成 · ${result.items.filter(locationReview).length} 项待确认` : '地点查询：未开启 · 可手动填写');
@@ -135,6 +167,7 @@ export default function App() {
       return skipped ? { ...item, error: skipped.error, selected: false } : item;
     }));
     const skipped = batch.entries.filter(entry => entry.status !== 'moved');
+    await loadPending(inboxId);
     showNotice(`整理完成：已移动 ${moved.length} 个，跳过 ${skipped.length} 个。可在「操作记录」查看详情或撤销。${skipped.length ? '\n' + skipped.map(entry => `${entry.name}：${entry.error}`).join('\n') : ''}`, skipped.length > 0);
   };
 
@@ -150,6 +183,7 @@ export default function App() {
       return { ...next, selected: !needsReview(next) };
     });
     setItems(updated);
+    await loadPending(inboxId);
     if (auto) {
       const automatic = updated.filter(item => !isMedia(item) && !item.manual && item.category && item.category !== '其他' && item.confidence >= 0.85);
       if (automatic.length) {
@@ -171,9 +205,14 @@ export default function App() {
     return next;
   }));
   // 修改普通项目分类；手动选择会覆盖 AI 结果并自动勾选。
-  const updateCategory = (id, value) => setItems(previous => previous.map(item => item.id !== id ? item : {
-    ...item, category: value || null, manual: Boolean(value), selected: Boolean(value)
-  }));
+  const updateCategory = (id, value) => {
+    setItems(previous => previous.map(item => item.id !== id ? item : {
+      ...item, category: value || null, manual: Boolean(value), selected: Boolean(value)
+    }));
+    if (inboxId && session) api('pending/update', { id, changes: {
+      category: value || null, recommendationSource: value ? 'manual' : 'unclassified', status: 'pending'
+    } }, session.token).catch(error => showNotice(error.message, true));
+  };
   // 更新单项勾选状态，实际移动前仍由后端重新验证路径和文件身份。
   const selectItem = (id, checked) => setItems(previous => previous.map(item => item.id === id ? { ...item, selected: checked } : item));
 
@@ -212,6 +251,9 @@ export default function App() {
       {view === 'organize' && <section id="organize-view">
         <div className="page-heading"><div><div className="eyebrow">A LITTLE ORDER, A LITTLE CALM</div><h1>给文件和文件夹，一个好去处<span>。</span></h1><p>从杂乱到有序。让 AI 推荐标签，由你决定如何整理。</p></div><span className="heading-mark" aria-hidden="true">▱</span></div>
         <section className="panel source-panel" aria-labelledby="source-title"><div className="section-title"><span className="step">01</span><h2 id="source-title">选择整理范围</h2><span className="subtle">扫描直属文件与文件夹</span></div>
+          {inboxes.length > 0 && <label className="inbox-select">收件箱<select id="inbox" value={inboxId} onChange={chooseInbox} disabled={busy}>
+            <option value="">临时扫描（不保存待处理列表）</option>{inboxes.map(inbox => <option key={inbox.id} value={inbox.id}>{inbox.name}</option>)}
+          </select></label>}
           <form id="scan-form" onSubmit={scanFolder}><label htmlFor="root">父目录路径</label><div className="path-row"><span aria-hidden="true">▱</span>
             <input id="root" placeholder="选择文件夹，或输入绝对路径" autoComplete="off" required value={root} onChange={event => setRoot(event.target.value)} disabled={busy} />
             <button type="button" className="secondary" id="pick-folder" onClick={pickFolder} disabled={busy || !session}>选择文件夹</button>
@@ -223,7 +265,7 @@ export default function App() {
               setLocationStatus(checked ? '地点查询：已允许，请重新扫描后解析' : '地点查询：未开启；重新扫描后更新预览');
             }} /><span>允许 Apple 根据 GPS 查询国家和城市</span></label>
             <p>媒体文件留在本机；查询地点时，坐标可能发送给 Apple。勾选后请重新扫描，也可手动填写地点。</p></div>
-          <div className="scan-status" aria-live="polite"><span id="metadata-status">{metadataStatus}</span><span id="location-status">{locationStatus}</span></div>
+          <div className="scan-status" aria-live="polite"><span id="metadata-status">{metadataStatus}</span><span id="location-status">{locationStatus}</span>{inboxId && <span id="pending-status">待处理：{pending.filter(item => item.status === 'pending').length}</span>}</div>
           <div className="source-footer"><span>AI 仅发送名称、扩展名与目录样本，不读取文件内容</span><span id="ai-status" className="status-pill">{session?.aiEnabled ? '✧ API Key 已配置' : session ? '未配置 API Key · 可手动整理' : '正在连接…'}</span></div>
         </section>
         <div id="notice" className={`notice${notice.error ? ' error' : ''}`} role="status" aria-live="polite" hidden={!notice.text}>{notice.text}</div>
@@ -242,7 +284,7 @@ export default function App() {
               <th>名称与类型</th><th>分类 / 调整位置</th><th>来源与状态</th><th>整理后的位置</th></tr></thead>
               <tbody id="folder-rows">{visible.map(item => isMedia(item)
                 ? <MediaRow key={item.id} item={item} root={scan.root} busy={busy} onEdit={updateMedia} onSelect={selectItem} />
-                : <OrdinaryRow key={item.id} item={item} root={scan.root} categories={session.categories} busy={busy} onCategory={updateCategory} onSelect={selectItem} />)}</tbody></table></div>
+                : <OrdinaryRow key={item.id} item={item} root={scan.root} categories={taxonomyCategories} busy={busy} onCategory={updateCategory} onSelect={selectItem} />)}</tbody></table></div>
             <div id="empty" className="empty" hidden={visible.length > 0}><div className="empty-icon">▱</div><h3>{scan ? items.length ? '没有符合条件的项目' : '这里已经很整齐了' : '有序，从选择一个目录开始'}</h3>
               <p>{scan ? items.length ? '试试其他搜索词或切换到全部项目。' : '未发现待整理的直属文件或文件夹。隐藏项目、符号链接和已有分类目录会跳过。' : '选择本机文件夹或输入路径，扫描后为每个项目找到合适的标签。'}</p>
               {!scan && <div className="empty-tags">{['工作', '学习', '生活', '影音', '软件', '其他'].map(name => <span key={name}>{name}</span>)}</div>}</div>

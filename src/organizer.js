@@ -120,7 +120,8 @@ export class Organizer {
     const items = [...ordinaryItems, ...ordinaryFiles, ...scannedMedia.mediaItems];
     if (items.length > 500) throw new Error('直属文件和文件夹超过 500 项，请分批选择更小的父目录。');
     items.sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'));
-    const scan = { id: randomUUID(), root, rootIdentity, items, skipped };
+    const scan = { id: randomUUID(), root, rootIdentity, items, skipped,
+      allowedCategories: Array.isArray(options.categories) && options.categories.length ? [...options.categories] : [...categoryNames] };
     this.scans.set(scan.id, scan);
     if (this.scans.size > 20) this.scans.delete(this.scans.keys().next().value);
     return toPublicScan(scan, { exposeCoordinates: options.resolveLocations === true });
@@ -341,7 +342,8 @@ function prepareSelection(scan, selection) {
     segments = buildMediaSegments(item.facts, overrides).map(safeSegment);
     originals = item.members;
   } else {
-    if (!categoryNames.includes(selection.category)) throw new Error('分类选择无效，请重新扫描。');
+    const allowedCategories = scan.allowedCategories ?? categoryNames;
+    if (!allowedCategories.includes(selection.category)) throw new Error('分类选择无效，请重新扫描。');
     segments = [selection.category];
     originals = [{ name: item.name, identity: item.identity }];
   }

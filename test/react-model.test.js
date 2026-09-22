@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { canMove, mediaDestinationPaths, matchesFilter, selectionFor } from '../ui/item-model.js';
+import { canMove, flattenTaxonomy, mediaDestinationPaths, matchesFilter, selectionFor } from '../ui/item-model.js';
 
 const live = { id: 'live', type: 'media', name: 'live.heic', mediaType: 'live-photo',
   members: [{ name: 'live.heic' }, { name: 'live.mov' }], year: '2026', month: '09',
@@ -22,4 +22,10 @@ test('React retains ordinary provider confidence review and filter semantics', (
   assert.equal(matchesFilter(ordinary, 'review'), true);
   assert.equal(matchesFilter({ ...ordinary, confidence: 0.9 }, 'review'), false);
   assert.deepEqual(selectionFor(ordinary), { id: 'doc', category: '学习' });
+});
+
+test('React flattens the selected inbox taxonomy into stable category paths', () => {
+  assert.deepEqual(flattenTaxonomy([{ name: '工作', path: '工作', children: [{ name: '会议', path: '工作/会议', children: [] }] }]), [
+    { value: '工作', label: '工作' }, { value: '工作/会议', label: '工作 / 会议' }
+  ]);
 });
