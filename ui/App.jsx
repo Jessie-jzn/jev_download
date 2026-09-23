@@ -240,7 +240,7 @@ export default function App() {
   };
 
   return <div data-react-app>
-    <aside className="sidebar"><a className="brand" href="/" aria-label="归屿首页"><span className="brand-icon">▧</span><span>归屿<small>FOLDER ISLAND</small></span></a>
+    <aside className="sidebar"><a className="brand" href="/" aria-label="Jev AI 归屿首页"><span className="brand-icon">▧</span><span>Jev AI 归屿<small>LOCAL ORGANIZER</small></span></a>
       <p className="nav-label">我的空间</p><nav aria-label="主导航">
         <button className={`nav-item ${view === 'organize' ? 'active' : ''}`} id="nav-organize" onClick={() => setView('organize')}><span>▦</span> 分类整理 {view === 'organize' && <span className="nav-dot" />}</button>
         <button className={`nav-item ${view === 'history' ? 'active' : ''}`} id="nav-history" onClick={showHistory}><span>◷</span> 操作记录</button>

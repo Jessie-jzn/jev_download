@@ -226,5 +226,5 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('PORT 必须是 1–65535 之间的整数。');
   const server = createApp();
   server.on('error', error => { console.error(`启动失败：${error.message}`); process.exitCode = 1; });
-  server.listen(port, '127.0.0.1', () => console.log(`文件与文件夹整理工具已启动：http://127.0.0.1:${port}`));
+  server.listen(port, '127.0.0.1', () => console.log(`Jev AI 归屿已启动：http://127.0.0.1:${port}`));
 }

@@ -1,4 +1,4 @@
-# 归屿 · 文件与媒体分类整理
+# Jev AI 归屿 · 本机智能资料管家
 
 本地整理工具：照片、视频和 Live Photo 按拍摄年月与国家城市整理；普通文件与文件夹通过 [TypeSafe JavaScript SDK](https://docs.typesafe.ai/sdk/javascript) 推荐分类，也可手动分类。移动与撤销保持文件字节和文件夹内部结构不变。
 
